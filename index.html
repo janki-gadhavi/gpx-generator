@@ -196,6 +196,32 @@ footer a { color: var(--accent); text-decoration: none; }
   .field-row, .field-row-3 { grid-template-columns: 1fr; }
   .seg-row, .stop-row { grid-template-columns: 1fr 1fr auto; }
 }
+
+/* Tabs */
+.tab-row { display: flex; gap: 6px; margin-bottom: 14px; }
+.tab {
+  background: var(--surface2); border: 0.5px solid var(--border2);
+  border-radius: var(--radius); padding: 7px 14px;
+  font-size: 13px; font-weight: 500; color: var(--text2);
+  cursor: pointer; transition: all .15s;
+}
+.tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* Upload zone */
+.upload-zone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border: 1.5px dashed var(--border2); border-radius: var(--radius-lg);
+  padding: 28px 16px; cursor: pointer; transition: all .2s;
+  background: var(--surface2); text-align: center; gap: 8px;
+}
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--accent); background: var(--accent-bg);
+}
+.upload-icon { font-size: 28px; color: var(--text3); }
+.upload-text { font-size: 13px; color: var(--text2); }
+.upload-zone.loaded { border-style: solid; border-color: var(--accent); background: var(--accent-bg); }
+.upload-zone.loaded .upload-icon { color: var(--accent); }
+
 </style>
 </head>
 <body>
@@ -213,25 +239,52 @@ footer a { color: var(--accent); text-decoration: none; }
 <!-- Route -->
 <div class="card">
   <div class="card-title">Route</div>
-  <div class="field-row">
-    <div class="field">
-      <label>Start latitude</label>
-      <input type="number" id="lat1" value="12.975900" step="0.000001">
+
+  <!-- Tab switcher -->
+  <div class="tab-row">
+    <button class="tab active" id="tab-coords" onclick="switchTab('coords')">Manual coords</button>
+    <button class="tab" id="tab-upload" onclick="switchTab('upload')">Upload GPX</button>
+  </div>
+
+  <!-- Manual coords panel -->
+  <div id="panel-coords">
+    <div class="note" style="margin-bottom:12px">Straight-line interpolation between two points — good for quick tests, not road-accurate.</div>
+    <div class="field-row">
+      <div class="field">
+        <label>Start latitude</label>
+        <input type="number" id="lat1" value="12.975900" step="0.000001">
+      </div>
+      <div class="field">
+        <label>Start longitude</label>
+        <input type="number" id="lon1" value="77.711600" step="0.000001">
+      </div>
     </div>
-    <div class="field">
-      <label>Start longitude</label>
-      <input type="number" id="lon1" value="77.711600" step="0.000001">
+    <div class="field-row">
+      <div class="field">
+        <label>End latitude</label>
+        <input type="number" id="lat2" value="12.911300" step="0.000001">
+      </div>
+      <div class="field">
+        <label>End longitude</label>
+        <input type="number" id="lon2" value="77.642900" step="0.000001">
+      </div>
     </div>
   </div>
-  <div class="field-row">
-    <div class="field">
-      <label>End latitude</label>
-      <input type="number" id="lat2" value="12.911300" step="0.000001">
+
+  <!-- Upload GPX panel -->
+  <div id="panel-upload" style="display:none">
+    <div class="note" style="margin-bottom:12px">
+      <b>How to get a real road GPX from Google Maps:</b><br>
+      1. Open <a href="https://maps.google.com" target="_blank">Google Maps</a> → get directions → copy the URL<br>
+      2. Go to <a href="https://gmapstogpx.com" target="_blank">gmapstogpx.com</a> → paste URL → select <b>Waypoint mode</b> → Download GPX<br>
+      3. Upload the downloaded .gpx file below
     </div>
-    <div class="field">
-      <label>End longitude</label>
-      <input type="number" id="lon2" value="77.642900" step="0.000001">
-    </div>
+    <label class="upload-zone" id="upload-zone" for="gpx-file-input">
+      <div class="upload-icon">↑</div>
+      <div class="upload-text" id="upload-text">Drop a .gpx file here or click to browse</div>
+    </label>
+    <input type="file" id="gpx-file-input" accept=".gpx" style="display:none" onchange="handleGPXUpload(this)">
+    <div id="upload-stats" style="display:none;margin-top:8px" class="note"></div>
   </div>
 </div>
 
@@ -309,6 +362,89 @@ footer a { color: var(--accent); text-decoration: none; }
 let currentGPX = '';
 let segCount = 0;
 let stopCount = 0;
+let uploadedWaypoints = null; // [{lat, lon}] from uploaded GPX
+
+// ── Tabs ──────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.getElementById('panel-upload').style.display = tab === 'upload' ? '' : 'none';
+  document.getElementById('panel-coords').style.display = tab === 'coords' ? '' : 'none';
+  document.getElementById('tab-upload').classList.toggle('active', tab === 'upload');
+  document.getElementById('tab-coords').classList.toggle('active', tab === 'coords');
+  if (tab === 'coords') { uploadedWaypoints = null; }
+  updateZoneBar();
+}
+
+// ── GPX Upload ────────────────────────────────────────────────────────
+function handleGPXUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => parseUploadedGPX(e.target.result, file.name);
+  reader.readAsText(file);
+}
+
+function parseUploadedGPX(text, filename) {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(text, 'application/xml');
+    const parseErr = doc.querySelector('parsererror');
+    if (parseErr) { showToast('Invalid GPX file'); return; }
+
+    // Accept both trkpt and wpt
+    const trkpts = [...doc.querySelectorAll('trkpt')];
+    const wpts   = [...doc.querySelectorAll('wpt')];
+    const nodes  = trkpts.length > 0 ? trkpts : wpts;
+
+    if (nodes.length < 2) { showToast('GPX needs at least 2 points'); return; }
+
+    uploadedWaypoints = nodes.map(n => ({
+      lat: parseFloat(n.getAttribute('lat')),
+      lon: parseFloat(n.getAttribute('lon'))
+    })).filter(p => !isNaN(p.lat) && !isNaN(p.lon));
+
+    if (uploadedWaypoints.length < 2) { showToast('Could not read coordinates from GPX'); return; }
+
+    // Calc total distance
+    let distKm = 0;
+    for (let i = 1; i < uploadedWaypoints.length; i++) {
+      distKm += haversineKm(uploadedWaypoints[i-1].lat, uploadedWaypoints[i-1].lon,
+                            uploadedWaypoints[i].lat,   uploadedWaypoints[i].lon);
+    }
+
+    const zone = document.getElementById('upload-zone');
+    zone.classList.add('loaded');
+    zone.querySelector('.upload-icon').textContent = '✓';
+    document.getElementById('upload-text').textContent =
+      `${filename} — ${uploadedWaypoints.length} points, ${distKm.toFixed(1)} km`;
+
+    document.getElementById('upload-stats').style.display = '';
+    document.getElementById('upload-stats').textContent =
+      `Route loaded: ${uploadedWaypoints.length} waypoints across ${distKm.toFixed(1)} km. Hit Generate to build the GPX.`;
+
+    updateZoneBar();
+    showToast(`Loaded ${uploadedWaypoints.length} waypoints`);
+  } catch(e) {
+    showToast('Error reading GPX: ' + e.message);
+    console.error(e);
+  }
+}
+
+// Drag and drop support
+document.addEventListener('DOMContentLoaded', () => {
+  const zone = document.getElementById('upload-zone');
+  if (!zone) return;
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.gpx')) {
+      const reader = new FileReader();
+      reader.onload = ev => parseUploadedGPX(ev.target.result, file.name);
+      reader.readAsText(file);
+    } else { showToast('Please drop a .gpx file'); }
+  });
+});
 
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -422,12 +558,21 @@ function isoTime(base, offsetSec) {
 
 // ── Zone bar ──────────────────────────────────────────────────────────
 function updateZoneBar() {
-  const totalKm = haversineKm(
-    parseFloat(document.getElementById('lat1').value),
-    parseFloat(document.getElementById('lon1').value),
-    parseFloat(document.getElementById('lat2').value),
-    parseFloat(document.getElementById('lon2').value)
-  );
+  let totalKm;
+  if (uploadedWaypoints && uploadedWaypoints.length >= 2) {
+    totalKm = 0;
+    for (let i = 1; i < uploadedWaypoints.length; i++) {
+      totalKm += haversineKm(uploadedWaypoints[i-1].lat, uploadedWaypoints[i-1].lon,
+                             uploadedWaypoints[i].lat,   uploadedWaypoints[i].lon);
+    }
+  } else {
+    totalKm = haversineKm(
+      parseFloat(document.getElementById('lat1').value),
+      parseFloat(document.getElementById('lon1').value),
+      parseFloat(document.getElementById('lat2').value),
+      parseFloat(document.getElementById('lon2').value)
+    );
+  }
   const std  = parseFloat(document.getElementById('thr-std').value)  || 5;
   const high = parseFloat(document.getElementById('thr-high').value) || 3;
   const lowPct  = Math.max(0, ((totalKm - std)  / totalKm) * 100);
@@ -453,19 +598,37 @@ function generate() {
   const lat2 = parseFloat(document.getElementById('lat2').value);
   const lon2 = parseFloat(document.getElementById('lon2').value);
 
-  if ([lat1, lon1, lat2, lon2].some(isNaN)) { showToast('Enter valid coordinates'); return; }
+  // ── Decide source: uploaded GPX or manual coords ──
+  let rawWaypoints; // [{lat, lon}]
 
-  const totalKm = haversineKm(lat1, lon1, lat2, lon2);
+  if (uploadedWaypoints && uploadedWaypoints.length >= 2) {
+    rawWaypoints = uploadedWaypoints;
+  } else {
+    if ([lat1, lon1, lat2, lon2].some(isNaN)) { showToast('Enter valid coordinates'); return; }
+    // Straight-line: interpolate 200 points
+    const N = 200;
+    rawWaypoints = [];
+    for (let i = 0; i <= N; i++) {
+      rawWaypoints.push({ lat: lerp(lat1, lat2, i/N), lon: lerp(lon1, lon2, i/N) });
+    }
+  }
+
+  // ── Compute cumulative distances along waypoints ──
+  const cumDist = [0]; // cumDist[i] = km from start to waypoint i
+  for (let i = 1; i < rawWaypoints.length; i++) {
+    cumDist.push(cumDist[i-1] + haversineKm(
+      rawWaypoints[i-1].lat, rawWaypoints[i-1].lon,
+      rawWaypoints[i].lat,   rawWaypoints[i].lon
+    ));
+  }
+  const totalKm = cumDist[cumDist.length - 1];
+  if (totalKm < 0.001) { showToast('Route too short'); return; }
+
   const segs = getSegs();
   const stops = getStops();
+  const nSteps = rawWaypoints.length - 1;
 
-  // Build point list: one point per second along the route, sampled at interval
-  // We'll compute actual timestamps by integrating speed
-  const STEP_M = 30; // interpolate every 30m, then filter by speed/interval
-  const totalM = totalKm * 1000;
-  const nSteps = Math.max(100, Math.ceil(totalM / STEP_M));
-
-  // Build stop map: pct -> duration_seconds
+  // Build stop map keyed by waypoint index
   const stopMap = {};
   stops.forEach(s => {
     const key = Math.round(s.pct * nSteps);
@@ -474,23 +637,21 @@ function generate() {
 
   const base = new Date('2024-06-12T08:00:00Z');
   let timeSec = 0;
-  const pts = []; // {lat, lon, time_offset, distToEndKm}
+  const pts = [];
 
-  for (let i = 0; i <= nSteps; i++) {
-    const pct = i / nSteps;
-    const lat = lerp(lat1, lat2, pct);
-    const lon = lerp(lon1, lon2, pct);
-    const distToEndKm = totalKm * (1 - pct);
+  for (let i = 0; i < rawWaypoints.length; i++) {
+    const pct = cumDist[i] / totalKm;
+    const distToEndKm = totalKm - cumDist[i];
+    pts.push({ lat: rawWaypoints[i].lat, lon: rawWaypoints[i].lon, timeSec, distToEndKm });
 
-    pts.push({ lat, lon, timeSec, distToEndKm });
-
-    if (i < nSteps) {
+    if (i < rawWaypoints.length - 1) {
+      const segDistKm = haversineKm(
+        rawWaypoints[i].lat, rawWaypoints[i].lon,
+        rawWaypoints[i+1].lat, rawWaypoints[i+1].lon
+      );
       const speedKmh = speedAtPct(pct, segs);
       const speedMs = speedKmh / 3.6;
-      const stepM = (totalM / nSteps);
-      timeSec += stepM / speedMs;
-
-      // inject stop time
+      timeSec += (segDistKm * 1000) / speedMs;
       if (stopMap[i]) { timeSec += stopMap[i]; }
     }
   }
